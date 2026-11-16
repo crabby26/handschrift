@@ -1137,33 +1137,31 @@ const GN = (() => {
     const replica = (BigInt(r32())<<31n) ^ BigInt(r32());
     let seq = BigInt(Date.now()), nseq = 1000000 + Math.floor(Date.now()/1000) % 1000000;
     const now = Date.now();
-    const docId=uuid(), attId=uuid();
+    const docId=uuid(), attId=uuid(), attFile=uuid();
     const pt = mm => Math.round(mm*72/25.4*100)/100;  // wie GoodNotes: Seitenmaß in pt, auf 2 Stellen gerundet
     const W=pt(layout.dims.w)*11/6, H=pt(layout.dims.h)*11/6;
     const pdf=new Uint8Array(await (await buildPDF(layout,{ink:false})).arrayBuffer());
     const events=[], notesIndex=[], files=[];
+    // Aufbau exakt wie ein in GoodNotes importiertes PDF (Seite mit PDF-Hintergrund, ohne Papiervorlage)
     events.push(msg([P.s(1,docId), P.m(30,[P.s(1,docId), P.m(2,[P.s(1,title), lww()]), P.m(6,[P.s(1,'P'), lww()]), P.s(9,'de_DE'),
       P.d(10,now), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.b(17,EMPTY), P.b(18,EMPTY), P.m(19,[lww()]), P.v(20,24)])]));
-    events.push(msg([P.s(1,attId), P.m(6,[P.s(1,attId), P.s(2,attId), P.v(5,pdf.length), P.s(6,docId), P.d(10,now+1), P.s(11,uuid()),
+    events.push(msg([P.s(1,attId), P.m(6,[P.s(1,attId), P.s(2,attFile), P.v(5,pdf.length), P.s(6,docId), P.d(10,now+1), P.s(11,uuid()),
       P.m(12,[P.v(1,1),P.v(2,1)]), P.v(14,replica), P.v(15,seq++), P.v(16,24)])]));
     layout.pages.forEach((page, i) => {
       const pageId=uuid();
       const base=uuid().slice(0,35); const layerId=base+'2', notesId=base+'3';
-      events.push(msg([P.s(1,pageId), P.m(2,[P.s(1,docId), P.s(2,pageId), P.s(4,attId), P.v(5,i+1), P.v(6,1), P.d(7,29.33333396911621),
-        P.m(8,[P.f(1,W),P.f(2,H)]), P.s(9,'9FE8F365-4BEE-5057-8573-1A56C77CAC19_a4_1_1 - Yellow'), P.d(10,now+2+i), P.s(11,uuid()),
-        P.m(12,[P.d(1,29.33333396911621), lww()]), P.m(13,[P.v(1,1), lww()]), P.v(15,replica), P.v(16,seq++), P.m(17,[P.v(1,1), lww()]),
-        P.m(18,[P.m(1,[P.m(1,[P.f(1,44),P.f(2,58.66666793823242)]), P.m(2,[P.f(1,W-88),P.f(2,H-117.33333333)])]), P.f(2,28.416667938232422), P.f(3,0.9166666865348816), P.v(5,1)]),
-        P.m(19,[lww()]), P.v(21,24)])]));
+      events.push(msg([P.s(1,pageId), P.m(2,[P.s(1,docId), P.s(2,pageId), P.s(4,attId), P.v(5,i+1),
+        P.m(8,[P.f(1,W),P.f(2,H)]), P.d(10,now+2+i), P.s(11,uuid()),
+        P.m(12,[lww()]), P.m(13,[lww()]), P.v(15,replica), P.v(16,seq++), P.m(17,[lww()]), P.m(19,[lww()]), P.v(21,24)])]));
       events.push(msg([P.s(1,layerId), P.m(54,[P.s(1,docId), P.s(2,layerId), P.m(3,[P.s(1,pageId), lww()]),
         P.m(4,[P.s(1,'P'+String.fromCharCode(65+Math.min(i,25))+(i>25?String(i):'')), lww()]), P.d(10,now+3+i), P.s(11,uuid()),
         P.v(13,replica), P.v(14,seq++), P.v(15,24),
         P.m(17,[P.m(1,[P.m(2,[P.m(1,[P.f(1,0.8666667),P.f(2,0.8666667),P.f(3,0.8666667),P.f(4,1)]), P.m(2,[P.f(1,1),P.f(2,1),P.f(3,1),P.f(4,1)])])]), lww()])])]));
       if(i===0) events.push(msg([P.s(1,docId), P.m(10,[P.s(1,docId), P.s(2,layerId), P.s(3,'PagingViewServiceUpdater:'+uuid()),
         P.d(10,now+5), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.v(15,24)])]));
-      if(variant==='C') return;   // leeres Testdokument: keine Notiz-Datei, wie ein frisches GoodNotes-Dokument
-      // Striche
+      // Striche (beim leeren Testdokument: leere Notiz-Datei, genau wie GoodNotes bei einer unbeschriebenen Seite)
       const recs=[];
-      page.strokes.forEach((s, j) => {
+      if(variant!=='C') page.strokes.forEach((s, j) => {
         const id=uuid(), ver=r32();
         const blob=lz4(tpl(strokeItems(s, variant)));
         const col=[]; s.rgb.forEach((v,ci)=>{ if(v>0) col.push(P.f(ci+1,v)); }); col.push(P.f(4,1));
@@ -1173,18 +1171,17 @@ const GN = (() => {
       });
       files.push({name:'notes/'+notesId, data:frame(recs)});
       notesIndex.push(msg([P.s(1,notesId), P.s(2,'notes/'+notesId)]));
-      events.push(msg([P.s(1,notesId), P.m(102,[P.s(1,notesId), P.d(10,now+10+i), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.v(15,24), P.s(16,docId)])]));
+      if(recs.length) events.push(msg([P.s(1,notesId), P.m(102,[P.s(1,notesId), P.d(10,now+10+i), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.v(15,24), P.s(16,docId)])]));
     });
     const all=[
       {name:'document.info.pb', data:EMPTY},
-      {name:'index.search.pb', data:frame([msg([P.s(1,attId), P.s(2,'search/'+attId), P.v(3,1)])])},
+      {name:'index.search.pb', data:EMPTY},
       {name:'index.notes.pb', data:frame(notesIndex)},
-      {name:'search/'+attId, data:frame([msg([P.v(2,1), P.b(3,EMPTY)])])},
       ...files,
       {name:'index.events.pb', data:frame(events)},
       {name:'thumbnail.jpg', data:await thumbnail(layout)},
-      {name:'index.attachments.pb', data:frame([msg([P.s(1,attId), P.s(2,'attachments/'+attId)])])},
-      {name:'attachments/'+attId, data:pdf},
+      {name:'index.attachments.pb', data:frame([msg([P.s(1,attId), P.s(2,'attachments/'+attFile)])])},
+      {name:'attachments/'+attFile, data:pdf},
       {name:'schema.pb', data:msg([P.v(1,24)])}
     ];
     return new Blob([await zip(all)], {type:'application/octet-stream'});
