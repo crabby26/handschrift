@@ -1,7 +1,7 @@
 // Offline-Speicher für die Handschrift-App.
 // Lädt die App zuerst aus dem Internet (damit Updates sofort ankommen)
 // und nutzt die gespeicherte Kopie, wenn kein Netz da ist.
-const CACHE = 'handschrift-v3';
+const CACHE = 'handschrift-v4';
 const FILES = ['./', './index.html'];
 
 self.addEventListener('install', (e) => {

@@ -244,6 +244,7 @@ textarea#text::placeholder{color:var(--muted);opacity:.8}
 .spinner{width:20px;height:20px;border-radius:50%;border:2.5px solid var(--track);border-top-color:#22d3ee;border-right-color:#8b5cf6;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .export-actions{display:flex;flex-direction:column;gap:10px}
+#segExport button{font-size:14px;padding:0 4px}
 .howto{font-size:14px;color:var(--muted);line-height:1.55}
 .howto b{color:var(--text)}
 .howto ol{margin:8px 0 6px;padding-left:20px}
@@ -942,7 +943,7 @@ async function deflate(u8){
 }
 const f2 = v => (Math.round(v*100)/100).toString();
 const rgbOp = (c, op) => c.map(v=>(Math.round(v*1000)/1000).toString()).join(' ')+' '+op;
-async function buildPDF(layout){
+async function buildPDF(layout, opts={}){
   const enc = new TextEncoder();
   const d=layout.dims, k=72/25.4, W=d.w*k, H=d.h*k;
   const contents = [];
@@ -956,7 +957,7 @@ async function buildPDF(layout){
     out.push('1 J 1 j');
     if(pr.dots.length){ out.push(rgbOp(pr.dots[0][3],'RG')+' '+f2(pr.dots[0][2]*2)+' w'); for(const t of pr.dots) out.push(f2(t[0])+' '+f2(t[1])+' m '+f2(t[0])+' '+f2(t[1])+' l S'); }
     let lastC='';
-    for(const s of page.strokes){
+    for(const s of (opts.ink===false ? [] : page.strokes)){
       const c = rgbOp(s.rgb,'RG'); if(c!==lastC){ out.push(c); lastC=c; }
       const a=s.pts, n=a.length/3;
       let len=0; for(let i=1;i<n && len<0.05;i++) len+=Math.abs(a[3*i]-a[0])+Math.abs(a[3*i+1]-a[1]);
@@ -993,6 +994,195 @@ async function buildPDF(layout){
   add(x); add('trailer\n<< /Size '+(N+1)+' /Root 1 0 R /Info 3 0 R >>\nstartxref\n'+xref+'\n%%EOF\n');
   return new Blob(chunks, {type:'application/pdf'});
 }
+/* =====================================================================
+   GoodNotes-Export (experimentell)
+   Nachgebautes .goodnotes-Format: ZIP mit Protobuf-Ereignissen; jeder Strich
+   als „tpl“-Datensatz (Stiftpunkte als Kurven + Breite), Apple-LZ4-gepackt.
+   ===================================================================== */
+const GN = (() => {
+  const enc = new TextEncoder();
+  const EMPTY = new Uint8Array(0);
+  const cat = arrs => { let n=0; for(const a of arrs) n+=a.length; const o=new Uint8Array(n); let p=0; for(const a of arrs){ o.set(a,p); p+=a.length; } return o; };
+  const varint = n => { let v=BigInt(n); const out=[]; do{ let b=Number(v & 0x7fn); v >>= 7n; if(v>0n) b|=0x80; out.push(b); }while(v>0n); return new Uint8Array(out); };
+  const key = (f,t) => varint(f*8+t);
+  const P = {
+    v:(f,n)=>cat([key(f,0),varint(n)]),
+    s:(f,str)=>{ const b=enc.encode(str); return cat([key(f,2),varint(b.length),b]); },
+    b:(f,bytes)=>cat([key(f,2),varint(bytes.length),bytes]),
+    m:(f,parts)=>{ const b=cat(parts.filter(Boolean)); return cat([key(f,2),varint(b.length),b]); },
+    d:(f,x)=>{ const b=new Uint8Array(8); new DataView(b.buffer).setFloat64(0,x,true); return cat([key(f,1),b]); },
+    f:(f,x)=>{ const b=new Uint8Array(4); new DataView(b.buffer).setFloat32(0,x,true); return cat([key(f,5),b]); }
+  };
+  const msg = parts => cat(parts.filter(Boolean));
+  const frame = records => cat(records.flatMap(r => [varint(r.length), r]));
+  const r32 = () => crypto.getRandomValues(new Uint32Array(1))[0];
+  const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==='x'?r:(r&3|8)).toString(16);})).toUpperCase();
+  const lww = () => P.m(2,[P.v(1,1),P.v(2,r32())]);
+
+  /* tpl-Datensatz eines Strichs */
+  const FMT = 'vA(v)A(u)A(u)A(v)A(v)A(u)A(u)A(u)A(u)A(v)';
+  function tpl(items){
+    let size=0; for(const it of items) size += it.t==='v' ? 2 : 4+it.arr.length*(it.t==='Av'?2:4);
+    const head=8+FMT.length+1, out=new Uint8Array(head+size), dv=new DataView(out.buffer);
+    out.set(enc.encode('tpl'),0); dv.setUint32(4,out.length,true); out.set(enc.encode(FMT),8);
+    let p=head;
+    for(const it of items){
+      if(it.t==='v'){ dv.setUint16(p,it.val,true); p+=2; continue; }
+      dv.setUint32(p,it.arr.length,true); p+=4;
+      for(const x of it.arr){ if(it.t==='Av'){ dv.setUint16(p,x,true); p+=2; } else { dv.setFloat32(p,x,true); p+=4; } }
+    }
+    return out;
+  }
+  /* Apple-LZ4-Rahmen (bv41 … bv4$) mit reinen Literal-Blöcken */
+  function lz4(raw){
+    const parts=[];
+    for(let s=0; s<raw.length || s===0; s+=32768){
+      const chunk=raw.subarray(s, Math.min(raw.length, s+32768)), n=chunk.length, ext=[]; let tok;
+      if(n>=15){ tok=0xF0; let r=n-15; while(r>=255){ ext.push(255); r-=255; } ext.push(r); } else tok=n<<4;
+      const block=cat([new Uint8Array([tok]), new Uint8Array(ext), chunk]);
+      const h=new Uint8Array(12), dv=new DataView(h.buffer);
+      h.set(enc.encode('bv41'),0); dv.setUint32(4,n,true); dv.setUint32(8,block.length,true);
+      parts.push(h, block);
+      if(!raw.length) break;
+    }
+    parts.push(enc.encode('bv4$'));
+    return cat(parts);
+  }
+  /* ZIP (Deflate, wenn verfügbar) */
+  const CRC = (()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320^(c>>>1) : c>>>1; t[n]=c>>>0; } return t; })();
+  const crc32 = u => { let c=0xFFFFFFFF; for(let i=0;i<u.length;i++) c=CRC[(c^u[i])&255]^(c>>>8); return (c^0xFFFFFFFF)>>>0; };
+  async function deflateRaw(u){
+    if(typeof CompressionStream==='undefined') return null;
+    try{ const s=new Blob([u]).stream().pipeThrough(new CompressionStream('deflate-raw')); return new Uint8Array(await new Response(s).arrayBuffer()); }catch(e){ return null; }
+  }
+  async function zip(files){
+    const parts=[], central=[]; let off=0;
+    const d=new Date(), dt=((d.getFullYear()-1980)<<9)|((d.getMonth()+1)<<5)|d.getDate(), tm=(d.getHours()<<11)|(d.getMinutes()<<5)|(d.getSeconds()>>1);
+    for(const f of files){
+      const name=enc.encode(f.name), data=f.data, crc=crc32(data);
+      let comp = data.length ? await deflateRaw(data) : null, method=8;
+      if(!comp || comp.length>=data.length){ comp=data; method=0; }
+      const lh=new Uint8Array(30), v=new DataView(lh.buffer);
+      v.setUint32(0,0x04034b50,true); v.setUint16(4,20,true); v.setUint16(8,method,true); v.setUint16(10,tm,true); v.setUint16(12,dt,true);
+      v.setUint32(14,crc,true); v.setUint32(18,comp.length,true); v.setUint32(22,data.length,true); v.setUint16(26,name.length,true);
+      parts.push(lh,name,comp);
+      const ch=new Uint8Array(46), c=new DataView(ch.buffer);
+      c.setUint32(0,0x02014b50,true); c.setUint16(4,20,true); c.setUint16(6,20,true); c.setUint16(10,method,true); c.setUint16(12,tm,true); c.setUint16(14,dt,true);
+      c.setUint32(16,crc,true); c.setUint32(20,comp.length,true); c.setUint32(24,data.length,true); c.setUint16(28,name.length,true); c.setUint32(42,off,true);
+      central.push(ch,name); off += 30+name.length+comp.length;
+    }
+    const cd=cat(central), e=new Uint8Array(22), ev=new DataView(e.buffer);
+    ev.setUint32(0,0x06054b50,true); ev.setUint16(8,files.length,true); ev.setUint16(10,files.length,true); ev.setUint32(12,cd.length,true); ev.setUint32(16,off,true);
+    return cat([...parts, cd, e]);
+  }
+
+  /* Geometrie: mm -> GoodNotes-Einheiten (1 pt = 11/6 Einheiten) */
+  const UPMM = 72/25.4*11/6;
+  const NIB = Math.PI/6;
+  function strokeItems(s, variant){
+    const a=s.pts, n=a.length/3, pts=[];
+    for(let i=0;i<n;i++){
+      const x=a[3*i]*UPMM, y=a[3*i+1]*UPMM, w=a[3*i+2]/2*UPMM/0.8;
+      const l=pts[pts.length-1];
+      if(!l || Math.hypot(x-l[0],y-l[1])>=1.3) pts.push([x,y,w]);
+      else if(i===n-1 && Math.hypot(x-l[0],y-l[1])>0.05) pts.push([x,y,w]);
+    }
+    if(pts.length===1) pts.push([pts[0][0]+0.2, pts[0][1]+0.05, pts[0][2]]);
+    const cmds=[4], move=[pts[0][0],pts[0][1],pts[0][2],NIB], segs=[];
+    const mid=(p,q)=>[(p[0]+q[0])/2,(p[1]+q[1])/2,(p[2]+q[2])/2];
+    const quads=[]; // [start, ctrl, end]
+    let start=pts[0];
+    if(pts.length===2){ quads.push([start, mid(pts[0],pts[1]), pts[1]]); }
+    else for(let i=1;i<pts.length-1;i++){
+      const ctrl=pts[i], end = i<pts.length-2 ? mid(pts[i],pts[i+1]) : pts[pts.length-1];
+      quads.push([start, ctrl, end]); start=end;
+    }
+    for(const q of quads){ cmds.push(5); segs.push(q[1][0],q[1][1],q[1][2], q[2][0],q[2][1],q[2][2], NIB, NIB, 0.6); }
+    let counts=[], types=[], firsts=[], outline=[];
+    if(variant==='B'){
+      // vereinfachter Umriss: pro Kurvenstück eine geschlossene Kapsel aus quadratischen Kurven
+      for(const [S,C,E] of quads){
+        const nrm=(dx,dy)=>{ const L=Math.hypot(dx,dy)||1; return [-dy/L, dx/L]; };
+        const t0=nrm(C[0]-S[0],C[1]-S[1]), t1=nrm(E[0]-C[0],E[1]-C[1]), tc=nrm(E[0]-S[0],E[1]-S[1]);
+        const r0=S[2]*0.8, r1=E[2]*0.8, rc=C[2]*0.8;
+        const d0=[t0[1],-t0[0]], d1=[t1[1],-t1[0]]; // Laufrichtung
+        const L0=[S[0]+t0[0]*r0,S[1]+t0[1]*r0], R0=[S[0]-t0[0]*r0,S[1]-t0[1]*r0];
+        const L1=[E[0]+t1[0]*r1,E[1]+t1[1]*r1], R1=[E[0]-t1[0]*r1,E[1]-t1[1]*r1];
+        const LC=[C[0]+tc[0]*rc,C[1]+tc[1]*rc], RC=[C[0]-tc[0]*rc,C[1]-tc[1]*rc];
+        const pts2=[L0, LC,L1, [L1[0]+d1[0]*r1,L1[1]+d1[1]*r1],[E[0]+d1[0]*r1,E[1]+d1[1]*r1], [R1[0]+d1[0]*r1,R1[1]+d1[1]*r1],R1,
+          RC,R0, [R0[0]-d0[0]*r0,R0[1]-d0[1]*r0],[S[0]-d0[0]*r0,S[1]-d0[1]*r0], [L0[0]-d0[0]*r0,L0[1]-d0[1]*r0],L0];
+        counts.push(7); types.push(0,2,2,2,2,2,2); firsts.push(L0[0],L0[1]);
+        for(const p of pts2) outline.push(p[0],p[1]);
+      }
+    }
+    return [
+      {t:'v',val:2}, {t:'Av',arr:cmds}, {t:'Au',arr:move}, {t:'Au',arr:segs},
+      {t:'Av',arr:counts}, {t:'Av',arr:types}, {t:'Au',arr:firsts}, {t:'Au',arr:[]},
+      {t:'Au',arr:outline}, {t:'Au',arr:[]}, {t:'Av',arr:[]}
+    ];
+  }
+
+  async function thumbnail(layout){
+    const c=document.createElement('canvas'); const w=353, k=w/layout.dims.w; c.width=w; c.height=Math.round(layout.dims.h*k);
+    const ctx=c.getContext('2d'); drawPaper(ctx, layout.paper, layout.dims, k); drawStrokes(ctx, layout.pages[0].strokes, k);
+    const b=await new Promise(r=>c.toBlob(r,'image/jpeg',0.85)); c.width=c.height=1;
+    return new Uint8Array(await b.arrayBuffer());
+  }
+
+  async function build(layout, variant, title){
+    const replica = (BigInt(r32())<<31n) ^ BigInt(r32());
+    let seq = BigInt(Date.now()), nseq = 1000000 + Math.floor(Date.now()/1000) % 1000000;
+    const now = Date.now();
+    const docId=uuid(), attId=uuid();
+    const pt = mm => Math.round(mm*72/25.4*100)/100;  // wie GoodNotes: Seitenmaß in pt, auf 2 Stellen gerundet
+    const W=pt(layout.dims.w)*11/6, H=pt(layout.dims.h)*11/6;
+    const pdf=new Uint8Array(await (await buildPDF(layout,{ink:false})).arrayBuffer());
+    const events=[], notesIndex=[], files=[];
+    events.push(msg([P.s(1,docId), P.m(30,[P.s(1,docId), P.m(2,[P.s(1,title), lww()]), P.m(6,[P.s(1,'P'), lww()]), P.s(9,'de_DE'),
+      P.d(10,now), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.b(17,EMPTY), P.b(18,EMPTY), P.m(19,[lww()]), P.v(20,24)])]));
+    events.push(msg([P.s(1,attId), P.m(6,[P.s(1,attId), P.s(2,attId), P.v(5,pdf.length), P.s(6,docId), P.d(10,now+1), P.s(11,uuid()),
+      P.m(12,[P.v(1,1),P.v(2,1)]), P.v(14,replica), P.v(15,seq++), P.v(16,24)])]));
+    layout.pages.forEach((page, i) => {
+      const pageId=uuid();
+      const base=uuid().slice(0,35); const layerId=base+'2', notesId=base+'3';
+      events.push(msg([P.s(1,pageId), P.m(2,[P.s(1,docId), P.s(2,pageId), P.s(4,attId), P.v(5,i+1), P.v(6,1), P.d(7,29.33333396911621),
+        P.m(8,[P.f(1,W),P.f(2,H)]), P.s(9,'Handschrift'), P.d(10,now+2+i), P.s(11,uuid()), P.m(12,[P.d(1,29.33333396911621), lww()]),
+        P.m(13,[P.v(1,1), lww()]), P.v(15,replica), P.v(16,seq++), P.m(17,[P.v(1,1), lww()]), P.m(19,[lww()]), P.v(21,24)])]));
+      events.push(msg([P.s(1,layerId), P.m(54,[P.s(1,docId), P.s(2,layerId), P.m(3,[P.s(1,pageId), lww()]),
+        P.m(4,[P.s(1,'P'+String.fromCharCode(65+Math.min(i,25))+(i>25?String(i):'')), lww()]), P.d(10,now+3+i), P.s(11,uuid()),
+        P.v(13,replica), P.v(14,seq++), P.v(15,24),
+        P.m(17,[P.m(1,[P.m(2,[P.m(1,[P.f(1,0.8666667),P.f(2,0.8666667),P.f(3,0.8666667),P.f(4,1)]), P.m(2,[P.f(1,1),P.f(2,1),P.f(3,1),P.f(4,1)])])]), lww()])])]));
+      // Striche
+      const recs=[];
+      if(variant!=='C') page.strokes.forEach((s, j) => {
+        const id=uuid(), ver=r32();
+        const blob=lz4(tpl(strokeItems(s, variant)));
+        const col=[]; s.rgb.forEach((v,ci)=>{ if(v>0) col.push(P.f(ci+1,v)); }); col.push(P.f(4,1));
+        recs.push(msg([P.s(1,id), P.m(2,[P.v(1,2),P.v(2,ver)]), P.v(8,replica), P.v(9,nseq++), P.v(14,5381), P.v(16,24)]));
+        recs.push(P.m(7,[P.s(1,id), P.b(2,blob), P.v(3,1), P.m(4,col), P.b(6,EMPTY), P.m(7,[P.m(1,[P.v(1,j+1),P.v(2,r32())])]),
+          P.b(9,EMPTY), P.m(15,[P.v(1,2),P.v(2,ver)]), P.b(20,EMPTY), P.v(21,24)]));
+      });
+      files.push({name:'notes/'+notesId, data:frame(recs)});
+      notesIndex.push(msg([P.s(1,notesId), P.s(2,'notes/'+notesId)]));
+      events.push(msg([P.s(1,notesId), P.m(102,[P.s(1,notesId), P.d(10,now+10+i), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.v(15,24), P.s(16,docId)])]));
+    });
+    const all=[
+      {name:'document.info.pb', data:EMPTY},
+      {name:'index.search.pb', data:frame([msg([P.s(1,attId), P.s(2,'search/'+attId), P.v(3,1)])])},
+      {name:'index.notes.pb', data:frame(notesIndex)},
+      {name:'search/'+attId, data:frame([msg([P.v(2,1), P.b(3,EMPTY)])])},
+      ...files,
+      {name:'index.events.pb', data:frame(events)},
+      {name:'thumbnail.jpg', data:await thumbnail(layout)},
+      {name:'index.attachments.pb', data:frame([msg([P.s(1,attId), P.s(2,'attachments/'+attId)])])},
+      {name:'attachments/'+attId, data:pdf},
+      {name:'schema.pb', data:msg([P.v(1,24)])}
+    ];
+    return new Blob([await zip(all)], {type:'application/octet-stream'});
+  }
+  return { build };
+})();
+
 async function buildPNG(layout, idx, transparent){
   const page = layout.pages[idx]; const d=layout.dims;
   let k = 300/25.4, x0=0, y0=0, w=d.w, h=d.h;
@@ -1579,7 +1769,8 @@ const EX = { kind:'pdf', files:null, token:0 };
 const EXPORT_INFO = {
   pdf: '<b>PDF mit Papier</b> – ideal für GoodNotes.<ol><li>Tippe auf <b>Teilen</b> und wähle <b>GoodNotes</b>.</li><li>Wähle „Als neues Dokument importieren“ oder füge die Seiten in ein bestehendes Notizbuch ein.</li></ol>Die Schrift bleibt beim Zoomen gestochen scharf.',
   png: '<b>Bild mit Papier</b> (PNG, 300 dpi) – zum Verschicken per Nachricht oder Mail, oder zum Speichern in Fotos.',
-  ink: '<b>Nur die Schrift</b>, ohne Hintergrund – passt auf jede GoodNotes-Seite.<ol><li>Tippe auf <b>Kopieren</b>.</li><li>Öffne GoodNotes, tippe lange auf die Seite und wähle <b>Einsetzen</b>.</li><li>Verschieben und Größe anpassen – fertig.</li></ol>'
+  ink: '<b>Nur die Schrift</b>, ohne Hintergrund – passt auf jede GoodNotes-Seite.<ol><li>Tippe auf <b>Kopieren</b>.</li><li>Öffne GoodNotes, tippe lange auf die Seite und wähle <b>Einsetzen</b>.</li><li>Verschieben und Größe anpassen – fertig.</li></ol>',
+  gn: '<b>GoodNotes-Datei (Test)</b> – deine Schrift als echte GoodNotes-Tinte, damit Radierer und Lasso funktionieren. Noch experimentell, deshalb gibt es drei Testdateien:<ol><li><b>A</b> und <b>B</b> sind zwei Varianten mit deiner Schrift, <b>C</b> ist ein leeres Testdokument.</li><li>Tippe auf <b>Teilen</b> → <b>In Dateien sichern</b>.</li><li>In GoodNotes: <b>+ → Importieren</b> und die drei Dateien auswählen.</li><li>Sag mir: Welche öffnen sich, ist die Schrift sichtbar, und funktioniert der Radierer?</li></ol>'
 };
 function openExport(){
   if(!FONT.size) return;
@@ -1591,7 +1782,7 @@ async function prepareExport(){
   const tok=++EX.token; EX.files=null;
   $('#exportHowto').innerHTML = EXPORT_INFO[EX.kind];
   $('#btnShare').disabled=$('#btnCopy').disabled=$('#btnDownload').disabled=true;
-  $('#btnCopy').classList.toggle('hidden', EX.kind==='pdf');
+  $('#btnCopy').classList.toggle('hidden', EX.kind==='pdf' || EX.kind==='gn');
   $('#exportStatus').innerHTML='<div class="spinner"></div><span>Wird erstellt …</span>';
   await new Promise(r=>setTimeout(r,30));
   try{
@@ -1599,6 +1790,11 @@ async function prepareExport(){
     const L=LAYOUT, base='Handschrift-'+dateStr(); const files=[];
     if(EX.kind==='pdf'){
       const blob=await buildPDF(L); files.push(new File([blob], base+'.pdf', {type:'application/pdf'}));
+    } else if(EX.kind==='gn'){
+      for(const [v, label] of [['A','A'],['B','B'],['C','C-leer']]){
+        const blob=await GN.build(L, v, 'Handschrift '+label);
+        files.push(new File([blob], 'Handschrift-'+label+'.goodnotes', {type:'application/octet-stream'}));
+      }
     } else {
       for(let i=0;i<L.pages.length;i++){
         const blob=await buildPNG(L,i,EX.kind==='ink'); if(!blob) continue;
@@ -1610,7 +1806,7 @@ async function prepareExport(){
     if(!files.length){ $('#exportStatus').textContent='Es gibt nichts zu exportieren.'; return; }
     EX.files=files;
     const size=files.reduce((a,f)=>a+f.size,0);
-    const what = EX.kind==='pdf' ? (L.pages.length+(L.pages.length>1?' Seiten':' Seite')) : (files.length+(files.length>1?' Bilder':' Bild'));
+    const what = EX.kind==='pdf' ? (L.pages.length+(L.pages.length>1?' Seiten':' Seite')) : EX.kind==='gn' ? '3 Testdateien' : (files.length+(files.length>1?' Bilder':' Bild'));
     $('#exportStatus').innerHTML='✓ Bereit: '+what+' · '+fmtBytes(size);
     $('#btnShare').disabled=$('#btnDownload').disabled=false;
     $('#btnCopy').disabled = !(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
@@ -1661,7 +1857,7 @@ function bindEvents(){
   $('#btnShuffle').addEventListener('click', ()=>{ setSetting('seed', (Math.random()*4294967295)>>>0, {fast:true}); toast('Neu gemischt'); });
   $('#btnExport').addEventListener('click', openExport);
   $('#btnMissing').addEventListener('click', ()=>{ const m=$('#missingBanner')._missing||[]; const i=ALL_CHARS.indexOf(m.find(c=>ALL_CHARS.includes(c))); showView('setup'); if(i>=0) goToChar(i); });
-  makeSeg($('#segExport'), [{v:'pdf',label:'PDF'},{v:'png',label:'Bild'},{v:'ink',label:'Nur Schrift'}], ()=>EX.kind, v=>{ EX.kind=v; prepareExport(); });
+  makeSeg($('#segExport'), [{v:'pdf',label:'PDF'},{v:'png',label:'Bild'},{v:'ink',label:'Schrift'},{v:'gn',label:'GoodNotes'}], ()=>EX.kind, v=>{ EX.kind=v; prepareExport(); });
   $('#btnShare').addEventListener('click', doShare);
   $('#btnDownload').addEventListener('click', doDownload);
   $('#btnCopy').addEventListener('click', doCopy);
