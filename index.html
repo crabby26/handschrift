@@ -1024,7 +1024,7 @@ function downloadBlob(blob, name){
    ===================================================================== */
 const Pad = {
   el:null, ctx:null, U:80, W:0, H:0, baseY:0, dpr:1, rect:null,
-  strokes:[], cur:null, activeId:null, activeType:'', penSeen:false, lastDrawn:0, onChange:null,
+  strokes:[], cur:null, activeId:null, activeType:'', penSeen:false, lastPen:0, lastDrawn:0, onChange:null,
   init(canvas){
     this.el=canvas; this.ctx=canvas.getContext('2d');
     canvas.addEventListener('pointerdown', e=>this.down(e), {passive:false});
@@ -1067,17 +1067,22 @@ const Pad = {
     }
     if(!this.strokes.length && !this.cur){
       c.fillStyle='rgba(120,130,150,.55)'; c.font='500 15px -apple-system,Segoe UI,sans-serif'; c.textAlign='center';
-      c.fillText(this.penSeen ? 'Hier mit dem Apple Pencil schreiben' : 'Hier mit Stift oder Finger schreiben', this.W/2, b+U*0.62);
+      c.fillText('Hier mit Stift oder Finger schreiben', this.W/2, b+U*0.62);
       c.textAlign='left';
     }
   },
   livePressure(p){ const med = this.strokes.length ? medianPressure(this.strokes) : (this.activeType==='pen'?0.35:0.5); return clamp(0.5*p/med,0.08,1); },
   widthPx(p){ return PENS[S.pen].base*S.thickness*(0.68+0.64*this.livePressure(p))*(this.U/S.size); },
+  penActive(){ return this.penSeen && performance.now()-this.lastPen < 15000; },
   down(e){
-    if(e.pointerType==='pen') this.penSeen=true;
-    if(e.pointerType==='touch' && this.penSeen) return;                // Handballen ignorieren, wenn Pencil genutzt wird
+    if(e.pointerType==='pen'){
+      this.penSeen=true; this.lastPen=performance.now();
+      // Stift hat Vorrang: einen gerade begonnenen Handballen-/Finger-Strich verwerfen
+      if(this.activeId!==null && this.activeType!=='pen'){ try{ this.el.releasePointerCapture(this.activeId); }catch(_){} this.cur=null; this.activeId=null; this.redraw(); }
+    }
+    // Handballen ignorieren, solange der Pencil gerade benutzt wird
+    if(e.pointerType==='touch' && this.penActive()) return;
     if(this.activeId!==null){ if(e.pointerType==='touch' && this.activeType==='touch') this.cancel(); return; } // zweiter Finger = kein Schreiben
-    if(e.pointerType==='touch' && e.width && e.width>48) return;       // große Kontaktfläche = Handballen
     if(e.button>0) return;
     e.preventDefault();
     try{ this.el.setPointerCapture(e.pointerId); }catch(_){}
@@ -1088,6 +1093,7 @@ const Pad = {
     this.add(e); this.drawLive();
   },
   move(e){
+    if(e.pointerType==='pen') this.lastPen=performance.now();
     if(e.pointerId!==this.activeId || !this.cur) return;
     e.preventDefault();
     const list = e.getCoalescedEvents ? e.getCoalescedEvents() : null;

@@ -1,6 +1,7 @@
 // Offline-Speicher für die Handschrift-App.
-// Hält index.html auf dem Gerät vor, damit die App auch ohne Internet startet.
-const CACHE = 'handschrift-v2';
+// Lädt die App zuerst aus dem Internet (damit Updates sofort ankommen)
+// und nutzt die gespeicherte Kopie, wenn kein Netz da ist.
+const CACHE = 'handschrift-v3';
 const FILES = ['./', './index.html'];
 
 self.addEventListener('install', (e) => {
@@ -15,20 +16,23 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Erst aus dem Speicher laden (schnell & offline), im Hintergrund aktualisieren.
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
   if (url.origin !== self.location.origin) return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    const cached = await cache.match(e.request, { ignoreSearch: true });
-    const network = fetch(e.request).then((res) => {
+    try {
+      // Bei langsamem Netz nach 4 Sekunden auf die gespeicherte Kopie ausweichen
+      const res = await Promise.race([
+        fetch(e.request, { cache: 'no-cache' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 4000))
+      ]);
       if (res && res.ok) cache.put(e.request, res.clone());
       return res;
-    }).catch(() => null);
-    if (cached) { e.waitUntil(network); return cached; }
-    const res = await network;
-    return res || (await cache.match('./index.html')) || new Response('Offline', { status: 503 });
+    } catch (err) {
+      const cached = await cache.match(e.request, { ignoreSearch: true });
+      return cached || (await cache.match('./index.html')) || new Response('Offline', { status: 503 });
+    }
   })());
 });
