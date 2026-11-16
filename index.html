@@ -1098,7 +1098,7 @@ const GN = (() => {
       quads.push([start, ctrl, end]); start=end;
     }
     for(const q of quads){ cmds.push(5); segs.push(q[1][0],q[1][1],q[1][2], q[2][0],q[2][1],q[2][2], NIB, NIB, 0.6); }
-    let counts=[], types=[], firsts=[], outline=[];
+    let counts=[], types=[], firsts=[], outline=[], caps=[], capFlags=[];
     if(variant==='B'){
       // vereinfachter Umriss: pro Kurvenstück eine geschlossene Kapsel aus quadratischen Kurven
       for(const [S,C,E] of quads){
@@ -1113,12 +1113,16 @@ const GN = (() => {
           RC,R0, [R0[0]-d0[0]*r0,R0[1]-d0[1]*r0],[S[0]-d0[0]*r0,S[1]-d0[1]*r0], [L0[0]-d0[0]*r0,L0[1]-d0[1]*r0],L0];
         counts.push(7); types.push(0,2,2,2,2,2,2); firsts.push(L0[0],L0[1]);
         for(const p of pts2) outline.push(p[0],p[1]);
+        // Abschlüsse wie im Original: erst Ende, dann Anfang (Mitte, Radien, Winkel, Federwinkel)
+        const a1=Math.atan2(E[1]-C[1],E[0]-C[0]), a0=Math.atan2(C[1]-S[1],C[0]-S[0]);
+        caps.push(E[0],E[1],E[2]*0.6,E[2], a1+Math.PI/2, a1-Math.PI/2, NIB,  S[0],S[1],S[2]*0.6,S[2], a0-Math.PI/2, a0+Math.PI/2, NIB);
+        capFlags.push(1,1);
       }
     }
     return [
       {t:'v',val:2}, {t:'Av',arr:cmds}, {t:'Au',arr:move}, {t:'Au',arr:segs},
       {t:'Av',arr:counts}, {t:'Av',arr:types}, {t:'Au',arr:firsts}, {t:'Au',arr:[]},
-      {t:'Au',arr:outline}, {t:'Au',arr:[]}, {t:'Av',arr:[]}
+      {t:'Au',arr:outline}, {t:'Au',arr:caps}, {t:'Av',arr:capFlags}
     ];
   }
 
@@ -1146,15 +1150,20 @@ const GN = (() => {
       const pageId=uuid();
       const base=uuid().slice(0,35); const layerId=base+'2', notesId=base+'3';
       events.push(msg([P.s(1,pageId), P.m(2,[P.s(1,docId), P.s(2,pageId), P.s(4,attId), P.v(5,i+1), P.v(6,1), P.d(7,29.33333396911621),
-        P.m(8,[P.f(1,W),P.f(2,H)]), P.s(9,'Handschrift'), P.d(10,now+2+i), P.s(11,uuid()), P.m(12,[P.d(1,29.33333396911621), lww()]),
-        P.m(13,[P.v(1,1), lww()]), P.v(15,replica), P.v(16,seq++), P.m(17,[P.v(1,1), lww()]), P.m(19,[lww()]), P.v(21,24)])]));
+        P.m(8,[P.f(1,W),P.f(2,H)]), P.s(9,'9FE8F365-4BEE-5057-8573-1A56C77CAC19_a4_1_1 - Yellow'), P.d(10,now+2+i), P.s(11,uuid()),
+        P.m(12,[P.d(1,29.33333396911621), lww()]), P.m(13,[P.v(1,1), lww()]), P.v(15,replica), P.v(16,seq++), P.m(17,[P.v(1,1), lww()]),
+        P.m(18,[P.m(1,[P.m(1,[P.f(1,44),P.f(2,58.66666793823242)]), P.m(2,[P.f(1,W-88),P.f(2,H-117.33333333)])]), P.f(2,28.416667938232422), P.f(3,0.9166666865348816), P.v(5,1)]),
+        P.m(19,[lww()]), P.v(21,24)])]));
       events.push(msg([P.s(1,layerId), P.m(54,[P.s(1,docId), P.s(2,layerId), P.m(3,[P.s(1,pageId), lww()]),
         P.m(4,[P.s(1,'P'+String.fromCharCode(65+Math.min(i,25))+(i>25?String(i):'')), lww()]), P.d(10,now+3+i), P.s(11,uuid()),
         P.v(13,replica), P.v(14,seq++), P.v(15,24),
         P.m(17,[P.m(1,[P.m(2,[P.m(1,[P.f(1,0.8666667),P.f(2,0.8666667),P.f(3,0.8666667),P.f(4,1)]), P.m(2,[P.f(1,1),P.f(2,1),P.f(3,1),P.f(4,1)])])]), lww()])])]));
+      if(i===0) events.push(msg([P.s(1,docId), P.m(10,[P.s(1,docId), P.s(2,layerId), P.s(3,'PagingViewServiceUpdater:'+uuid()),
+        P.d(10,now+5), P.s(11,uuid()), P.v(13,replica), P.v(14,seq++), P.v(15,24)])]));
+      if(variant==='C') return;   // leeres Testdokument: keine Notiz-Datei, wie ein frisches GoodNotes-Dokument
       // Striche
       const recs=[];
-      if(variant!=='C') page.strokes.forEach((s, j) => {
+      page.strokes.forEach((s, j) => {
         const id=uuid(), ver=r32();
         const blob=lz4(tpl(strokeItems(s, variant)));
         const col=[]; s.rgb.forEach((v,ci)=>{ if(v>0) col.push(P.f(ci+1,v)); }); col.push(P.f(4,1));
@@ -1770,7 +1779,7 @@ const EXPORT_INFO = {
   pdf: '<b>PDF mit Papier</b> – ideal für GoodNotes.<ol><li>Tippe auf <b>Teilen</b> und wähle <b>GoodNotes</b>.</li><li>Wähle „Als neues Dokument importieren“ oder füge die Seiten in ein bestehendes Notizbuch ein.</li></ol>Die Schrift bleibt beim Zoomen gestochen scharf.',
   png: '<b>Bild mit Papier</b> (PNG, 300 dpi) – zum Verschicken per Nachricht oder Mail, oder zum Speichern in Fotos.',
   ink: '<b>Nur die Schrift</b>, ohne Hintergrund – passt auf jede GoodNotes-Seite.<ol><li>Tippe auf <b>Kopieren</b>.</li><li>Öffne GoodNotes, tippe lange auf die Seite und wähle <b>Einsetzen</b>.</li><li>Verschieben und Größe anpassen – fertig.</li></ol>',
-  gn: '<b>GoodNotes-Datei (Test)</b> – deine Schrift als echte GoodNotes-Tinte, damit Radierer und Lasso funktionieren. Noch experimentell, deshalb gibt es drei Testdateien:<ol><li><b>A</b> und <b>B</b> sind zwei Varianten mit deiner Schrift, <b>C</b> ist ein leeres Testdokument.</li><li>Tippe auf <b>Teilen</b> → <b>In Dateien sichern</b>.</li><li>In GoodNotes: <b>+ → Importieren</b> und die drei Dateien auswählen.</li><li>Sag mir: Welche öffnen sich, ist die Schrift sichtbar, und funktioniert der Radierer?</li></ol>'
+  gn: '<b>GoodNotes-Datei (Test)</b> – deine Schrift als echte GoodNotes-Tinte, damit Radierer und Lasso funktionieren. Noch experimentell, deshalb gibt es drei nummerierte Testdateien:<ol><li>Tippe auf <b>Teilen</b> → <b>In Dateien sichern</b>.</li><li>In GoodNotes: <b>+ → Importieren</b> und alle drei auswählen.</li><li>Öffne sie <b>der Reihe nach</b>: zuerst „Handschrift 1-Leer“, dann „2-Schrift-B“, zuletzt „3-Schrift-A“.</li><li>Sag mir, bei welcher Nummer GoodNotes abstürzt – und ob Schrift und Radierer funktionieren.</li></ol>'
 };
 function openExport(){
   if(!FONT.size) return;
@@ -1791,7 +1800,7 @@ async function prepareExport(){
     if(EX.kind==='pdf'){
       const blob=await buildPDF(L); files.push(new File([blob], base+'.pdf', {type:'application/pdf'}));
     } else if(EX.kind==='gn'){
-      for(const [v, label] of [['A','A'],['B','B'],['C','C-leer']]){
+      for(const [v, label] of [['C','1-Leer'],['B','2-Schrift-B'],['A','3-Schrift-A']]){
         const blob=await GN.build(L, v, 'Handschrift '+label);
         files.push(new File([blob], 'Handschrift-'+label+'.goodnotes', {type:'application/octet-stream'}));
       }
