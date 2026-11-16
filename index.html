@@ -1079,7 +1079,7 @@ const GN = (() => {
   /* Geometrie: mm -> GoodNotes-Einheiten (1 pt = 11/6 Einheiten) */
   const UPMM = 72/25.4*11/6;
   const NIB = Math.PI/6;
-  function strokeItems(s, variant){
+  function strokeItems(s){
     const a=s.pts, n=a.length/3, pts=[];
     for(let i=0;i<n;i++){
       const x=a[3*i]*UPMM, y=a[3*i+1]*UPMM, w=a[3*i+2]/2*UPMM/0.8;
@@ -1098,26 +1098,33 @@ const GN = (() => {
       quads.push([start, ctrl, end]); start=end;
     }
     for(const q of quads){ cmds.push(5); segs.push(q[1][0],q[1][1],q[1][2], q[2][0],q[2][1],q[2][2], NIB, NIB, 0.6); }
-    let counts=[], types=[], firsts=[], outline=[], caps=[], capFlags=[];
-    if(variant==='B'){
-      // vereinfachter Umriss: pro Kurvenstück eine geschlossene Kapsel aus quadratischen Kurven
-      for(const [S,C,E] of quads){
-        const nrm=(dx,dy)=>{ const L=Math.hypot(dx,dy)||1; return [-dy/L, dx/L]; };
-        const t0=nrm(C[0]-S[0],C[1]-S[1]), t1=nrm(E[0]-C[0],E[1]-C[1]), tc=nrm(E[0]-S[0],E[1]-S[1]);
-        const r0=S[2]*0.8, r1=E[2]*0.8, rc=C[2]*0.8;
-        const d0=[t0[1],-t0[0]], d1=[t1[1],-t1[0]]; // Laufrichtung
-        const L0=[S[0]+t0[0]*r0,S[1]+t0[1]*r0], R0=[S[0]-t0[0]*r0,S[1]-t0[1]*r0];
-        const L1=[E[0]+t1[0]*r1,E[1]+t1[1]*r1], R1=[E[0]-t1[0]*r1,E[1]-t1[1]*r1];
-        const LC=[C[0]+tc[0]*rc,C[1]+tc[1]*rc], RC=[C[0]-tc[0]*rc,C[1]-tc[1]*rc];
-        const pts2=[L0, LC,L1, [L1[0]+d1[0]*r1,L1[1]+d1[1]*r1],[E[0]+d1[0]*r1,E[1]+d1[1]*r1], [R1[0]+d1[0]*r1,R1[1]+d1[1]*r1],R1,
-          RC,R0, [R0[0]-d0[0]*r0,R0[1]-d0[1]*r0],[S[0]-d0[0]*r0,S[1]-d0[1]*r0], [L0[0]-d0[0]*r0,L0[1]-d0[1]*r0],L0];
-        counts.push(7); types.push(0,2,2,2,2,2,2); firsts.push(L0[0],L0[1]);
-        for(const p of pts2) outline.push(p[0],p[1]);
-        // Abschlüsse wie im Original: erst Ende, dann Anfang (Mitte, Radien, Winkel, Federwinkel)
-        const a1=Math.atan2(E[1]-C[1],E[0]-C[0]), a0=Math.atan2(C[1]-S[1],C[0]-S[0]);
-        caps.push(E[0],E[1],E[2]*0.6,E[2], a1+Math.PI/2, a1-Math.PI/2, NIB,  S[0],S[1],S[2]*0.6,S[2], a0-Math.PI/2, a0+Math.PI/2, NIB);
-        capFlags.push(1,1);
-      }
+    /* Umriss-Speicher genau nach GoodNotes-Regeln:
+       pro Kurvenstück eine Teilform [Start, Kubik (3 Punkte), Bogen, Kubik, Bogen].
+       Feder = Ellipse mit Radien 0,6·w (x) und w (y), um NIB gedreht.
+       Bögen: Richtungswinkel im gedrehten Ellipsen-System, Flag 1 = abnehmender Winkel. */
+    const counts=[], types=[], firsts=[], outline=[], caps=[], capFlags=[];
+    const TAU=2*Math.PI, mod=x=>((x%TAU)+TAU)%TAU, cr=Math.cos(NIB), sr=Math.sin(NIB);
+    const support=(cx,cy,w,nx,ny)=>{ const rx=0.6*w, ry=w, lx=cr*nx+sr*ny, ly=-sr*nx+cr*ny, d=Math.hypot(rx*lx,ry*ly)||1;
+      const px=rx*rx*lx/d, py=ry*ry*ly/d; return [cx+cr*px-sr*py, cy+sr*px+cr*py]; };
+    const localAng=(dx,dy)=>Math.atan2(-sr*dx+cr*dy, cr*dx+sr*dy);
+    const cubic=(P0,P1,P2,P3)=>[ (-5*P0[0]+18*P1[0]-9*P2[0]+2*P3[0])/6, (-5*P0[1]+18*P1[1]-9*P2[1]+2*P3[1])/6,
+                                  (2*P0[0]-9*P1[0]+18*P2[0]-5*P3[0])/6, (2*P0[1]-9*P1[1]+18*P2[1]-5*P3[1])/6, P3[0], P3[1] ];
+    let lastDir=[1,0];
+    for(const [S,C,E] of quads){
+      const at=t=>{ const u=1-t; return [u*u*S[0]+2*u*t*C[0]+t*t*E[0], u*u*S[1]+2*u*t*C[1]+t*t*E[1], u*u*S[2]+2*u*t*C[2]+t*t*E[2]]; };
+      const tan=t=>{ let dx=2*(1-t)*(C[0]-S[0])+2*t*(E[0]-C[0]), dy=2*(1-t)*(C[1]-S[1])+2*t*(E[1]-C[1]), L=Math.hypot(dx,dy);
+        if(L<1e-6){ dx=E[0]-S[0]; dy=E[1]-S[1]; L=Math.hypot(dx,dy); } return L<1e-6 ? lastDir : [dx/L, dy/L]; };
+      const side=sign=>[0,1/3,2/3,1].map(t=>{ const q=at(t), d=tan(t); return support(q[0],q[1],q[2], -d[1]*sign, d[0]*sign); });
+      let A=side(1), B=side(-1);
+      const dEnd=tan(1), ff=localAng(dEnd[0],dEnd[1]);
+      const fa=localAng(A[3][0]-E[0],A[3][1]-E[1]), fb=localAng(B[3][0]-E[0],B[3][1]-E[1]);
+      if(!(mod(fa-ff) < mod(fa-fb))){ const t=A; A=B; B=t; }   // Endbogen muss vorne herum laufen
+      lastDir=dEnd;
+      firsts.push(A[0][0],A[0][1]); counts.push(5); types.push(0,2,6,2,6);
+      outline.push(...cubic(A[0],A[1],A[2],A[3]), ...cubic(B[3],B[2],B[1],B[0]));
+      caps.push(E[0],E[1],0.6*E[2],E[2], localAng(A[3][0]-E[0],A[3][1]-E[1]), localAng(B[3][0]-E[0],B[3][1]-E[1]), NIB,
+                S[0],S[1],0.6*S[2],S[2], localAng(B[0][0]-S[0],B[0][1]-S[1]), localAng(A[0][0]-S[0],A[0][1]-S[1]), NIB);
+      capFlags.push(1,1);
     }
     return [
       {t:'v',val:2}, {t:'Av',arr:cmds}, {t:'Au',arr:move}, {t:'Au',arr:segs},
@@ -1163,7 +1170,7 @@ const GN = (() => {
       const recs=[];
       if(variant!=='C') page.strokes.forEach((s, j) => {
         const id=uuid(), ver=r32();
-        const blob=lz4(tpl(strokeItems(s, variant)));
+        const blob=lz4(tpl(strokeItems(s)));
         const col=[]; s.rgb.forEach((v,ci)=>{ if(v>0) col.push(P.f(ci+1,v)); }); col.push(P.f(4,1));
         recs.push(msg([P.s(1,id), P.m(2,[P.v(1,2),P.v(2,ver)]), P.v(8,replica), P.v(9,nseq++), P.v(14,5381), P.v(16,24)]));
         recs.push(P.m(7,[P.s(1,id), P.b(2,blob), P.v(3,1), P.m(4,col), P.b(6,EMPTY), P.m(7,[P.m(1,[P.v(1,j+1),P.v(2,r32())])]),
@@ -1776,7 +1783,7 @@ const EXPORT_INFO = {
   pdf: '<b>PDF mit Papier</b> – ideal für GoodNotes.<ol><li>Tippe auf <b>Teilen</b> und wähle <b>GoodNotes</b>.</li><li>Wähle „Als neues Dokument importieren“ oder füge die Seiten in ein bestehendes Notizbuch ein.</li></ol>Die Schrift bleibt beim Zoomen gestochen scharf.',
   png: '<b>Bild mit Papier</b> (PNG, 300 dpi) – zum Verschicken per Nachricht oder Mail, oder zum Speichern in Fotos.',
   ink: '<b>Nur die Schrift</b>, ohne Hintergrund – passt auf jede GoodNotes-Seite.<ol><li>Tippe auf <b>Kopieren</b>.</li><li>Öffne GoodNotes, tippe lange auf die Seite und wähle <b>Einsetzen</b>.</li><li>Verschieben und Größe anpassen – fertig.</li></ol>',
-  gn: '<b>GoodNotes-Datei (Test)</b> – deine Schrift als echte GoodNotes-Tinte, damit Radierer und Lasso funktionieren. Noch experimentell, deshalb gibt es drei nummerierte Testdateien:<ol><li>Tippe auf <b>Teilen</b> → <b>In Dateien sichern</b>.</li><li>In GoodNotes: <b>+ → Importieren</b> und alle drei auswählen.</li><li>Öffne sie <b>der Reihe nach</b>: zuerst „Handschrift 1-Leer“, dann „2-Schrift-B“, zuletzt „3-Schrift-A“.</li><li>Sag mir, bei welcher Nummer GoodNotes abstürzt – und ob Schrift und Radierer funktionieren.</li></ol>'
+  gn: '<b>GoodNotes-Datei (Beta)</b> – deine Schrift als echte GoodNotes-Tinte: Radierer, Lasso und Farbe ändern funktionieren wie bei selbst geschriebener Schrift.<ol><li>Tippe auf <b>Teilen</b> → <b>In Dateien sichern</b>.</li><li>In GoodNotes: <b>+ → Importieren</b> und die Datei auswählen.</li></ol>Noch experimentell – sichere wichtige Notizen vorher.'
 };
 function openExport(){
   if(!FONT.size) return;
@@ -1797,10 +1804,8 @@ async function prepareExport(){
     if(EX.kind==='pdf'){
       const blob=await buildPDF(L); files.push(new File([blob], base+'.pdf', {type:'application/pdf'}));
     } else if(EX.kind==='gn'){
-      for(const [v, label] of [['C','1-Leer'],['B','2-Schrift-B'],['A','3-Schrift-A']]){
-        const blob=await GN.build(L, v, 'Handschrift '+label);
-        files.push(new File([blob], 'Handschrift-'+label+'.goodnotes', {type:'application/octet-stream'}));
-      }
+      const blob=await GN.build(L, 'ink', 'Handschrift '+dateStr());
+      files.push(new File([blob], base+'.goodnotes', {type:'application/octet-stream'}));
     } else {
       for(let i=0;i<L.pages.length;i++){
         const blob=await buildPNG(L,i,EX.kind==='ink'); if(!blob) continue;
@@ -1812,7 +1817,7 @@ async function prepareExport(){
     if(!files.length){ $('#exportStatus').textContent='Es gibt nichts zu exportieren.'; return; }
     EX.files=files;
     const size=files.reduce((a,f)=>a+f.size,0);
-    const what = EX.kind==='pdf' ? (L.pages.length+(L.pages.length>1?' Seiten':' Seite')) : EX.kind==='gn' ? '3 Testdateien' : (files.length+(files.length>1?' Bilder':' Bild'));
+    const what = (EX.kind==='pdf'||EX.kind==='gn') ? (L.pages.length+(L.pages.length>1?' Seiten':' Seite')) : (files.length+(files.length>1?' Bilder':' Bild'));
     $('#exportStatus').innerHTML='✓ Bereit: '+what+' · '+fmtBytes(size);
     $('#btnShare').disabled=$('#btnDownload').disabled=false;
     $('#btnCopy').disabled = !(window.ClipboardItem && navigator.clipboard && navigator.clipboard.write);
