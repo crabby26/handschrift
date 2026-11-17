@@ -1,2 +1,5 @@
 *.goodnotes
 .claude/
+
+# Papier-Vorlagen (nur als Vorlage, nicht veröffentlichen)
+formate/
